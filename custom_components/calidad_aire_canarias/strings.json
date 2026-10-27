@@ -1,0 +1,56 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Conectar con la API de Calidad del Aire de Canarias",
+        "description": "Introduce tu token de acceso (Bearer Token) para la API pública de Calidad del Aire del Gobierno de Canarias.",
+        "data": {
+          "access_token": "Token de acceso (Bearer Token)"
+        }
+      },
+      "station": {
+        "title": "Seleccionar estación de control activa",
+        "description": "Elige la estación activa de la Red de Control y Vigilancia de la Calidad del Aire de Canarias que deseas monitorizar.",
+        "data": {
+          "station_id": "Estación activa"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Reautenticar Calidad del Aire de Canarias",
+        "description": "El token Bearer configurado para la estación **{station_name}** ya no es válido. Introduce un nuevo token de acceso.",
+        "data": {
+          "access_token": "Nuevo token de acceso (Bearer Token)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "No se pudo conectar con la API del Gobierno de Canarias. Comprueba tu conexión o inténtalo más tarde.",
+      "invalid_auth": "Credencial Bearer ausente o no válida (HTTP 401/403).",
+      "rate_limited": "Se ha superado el límite de uso o coste de consulta de la API (HTTP 429). Inténtalo más tarde.",
+      "no_active_stations": "No se encontraron estaciones públicas activas en la respuesta de la API.",
+      "unknown": "Se produjo un error inesperado."
+    },
+    "abort": {
+      "already_configured": "Esta estación ya está configurada en Home Assistant.",
+      "reauth_successful": "La reautenticación se ha completado correctamente."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Opciones de Calidad del Aire de Canarias",
+        "description": "Ajusta la frecuencia de actualización de los datos horarios de la estación.",
+        "data": {
+          "scan_interval": "Intervalo de sondeo (minutos)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "station_ica": {
+        "name": "Índice de Calidad del Aire (ICA)"
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "domain": "calidad_aire_canarias",
+  "name": "Calidad del Aire - Gobierno de Canarias",
+  "codeowners": ["@alejandrojara"],
+  "config_flow": true,
+  "documentation": "https://github.com/alejandrojara/ha-calidad-aire-canarias",
+  "integration_type": "device",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/alejandrojara/ha-calidad-aire-canarias/issues",
+  "requirements": [],
+  "version": "20261027.1"
+}
