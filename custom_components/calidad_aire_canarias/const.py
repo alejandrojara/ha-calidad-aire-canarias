@@ -6,12 +6,17 @@ from datetime import timedelta
 from typing import Final
 
 DOMAIN: Final = "calidad_aire_canarias"
+VERSION: Final = "20261120.1"
+USER_AGENT: Final = (
+    f"ha-calidad-aire-canarias/{VERSION} "
+    "(+https://github.com/alejandrojara/ha-calidad-aire-canarias)"
+)
+
 MANUFACTURER: Final = "Gobierno de Canarias"
 MODEL: Final = "Red de Control y Vigilancia de la Calidad del Aire"
+PORTAL_URL: Final = "https://www3.gobiernodecanarias.org/calidadambiental/calidadaire/"
 
-BASE_URL: Final = (
-    "https://www3.gobiernodecanarias.org/calidadambiental/calidadaire/anemo"
-)
+BASE_URL: Final = "https://www3.gobiernodecanarias.org/calidadambiental/calidadaire/anemo"
 
 CONF_STATION_ID: Final = "station_id"
 CONF_STATION_NAME: Final = "station_name"
@@ -28,6 +33,9 @@ DEFAULT_SCAN_INTERVAL: Final = timedelta(minutes=DEFAULT_SCAN_INTERVAL_MINUTES)
 DEFAULT_REALTIME_LOOKBACK_HOURS: Final = 12
 
 DEFAULT_TIMEOUT: Final = 30
+MANUAL_REFRESH_COOLDOWN_SECONDS: Final = 60
+DEFAULT_RATE_LIMIT_BACKOFF_SECONDS: Final = 300
+MAX_RATE_LIMIT_BACKOFF_SECONDS: Final = 7200
 
 # Categorías estándar del Índice de Calidad del Aire (ICA) nacional/europeo
 ICA_CATEGORIES: Final[list[str]] = [

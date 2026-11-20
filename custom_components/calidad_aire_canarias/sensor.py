@@ -13,44 +13,60 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.const import (
-    CONCENTRATION_MICROGRAMS_PER_CUBIC_METER,
-    CONCENTRATION_MILLIGRAMS_PER_CUBIC_METER,
-    CONCENTRATION_PARTS_PER_MILLION,
     DEGREE,
     PERCENTAGE,
+    Platform,
     UnitOfIrradiance,
     UnitOfPrecipitationDepth,
     UnitOfPressure,
     UnitOfSpeed,
     UnitOfTemperature,
+    UnitOfVolumetricFlux,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .const import DOMAIN, MANUFACTURER, MODEL
+try:
+    from homeassistant.const import UnitOfDensity, UnitOfRatio
+
+    _UG_M3: str = UnitOfDensity.MICROGRAMS_PER_CUBIC_METER
+    _MG_M3: str = UnitOfDensity.MILLIGRAMS_PER_CUBIC_METER
+    _PPM: str = UnitOfRatio.PARTS_PER_MILLION
+    _PPB: str = UnitOfRatio.PARTS_PER_BILLION
+except ImportError:  # pragma: no cover - Home Assistant < 2026.8
+    import homeassistant.const as ha_const
+
+    _UG_M3 = str(ha_const.CONCENTRATION_MICROGRAMS_PER_CUBIC_METER)
+    _MG_M3 = str(ha_const.CONCENTRATION_MILLIGRAMS_PER_CUBIC_METER)
+    _PPM = str(ha_const.CONCENTRATION_PARTS_PER_MILLION)
+    _PPB = str(ha_const.CONCENTRATION_PARTS_PER_BILLION)
+
+from .const import ICA_CATEGORIES
 from .coordinator import (
     CalidadAireCanariasConfigEntry,
     CalidadAireCanariasDataUpdateCoordinator,
     ParameterMetadata,
     ParameterReading,
 )
+from .entity import CalidadAireCanariasEntity
 
 _LOGGER = logging.getLogger(__name__)
 
+PARALLEL_UPDATES = 0
+
 # Normalización de símbolos de unidades devueltos por la API a constantes de Home Assistant
 UNIT_NORMALIZATION: dict[str, str] = {
-    "ug/m3": CONCENTRATION_MICROGRAMS_PER_CUBIC_METER,
-    "ug/m³": CONCENTRATION_MICROGRAMS_PER_CUBIC_METER,
-    "µg/m3": CONCENTRATION_MICROGRAMS_PER_CUBIC_METER,
-    "µg/m³": CONCENTRATION_MICROGRAMS_PER_CUBIC_METER,
-    "μg/m3": CONCENTRATION_MICROGRAMS_PER_CUBIC_METER,
-    "μg/m³": CONCENTRATION_MICROGRAMS_PER_CUBIC_METER,
-    "mg/m3": CONCENTRATION_MILLIGRAMS_PER_CUBIC_METER,
-    "mg/m³": CONCENTRATION_MILLIGRAMS_PER_CUBIC_METER,
-    "ppm": CONCENTRATION_PARTS_PER_MILLION,
+    "ug/m3": _UG_M3,
+    "ug/m³": _UG_M3,
+    "µg/m3": _UG_M3,
+    "µg/m³": _UG_M3,
+    "μg/m3": _UG_M3,
+    "μg/m³": _UG_M3,
+    "mg/m3": _MG_M3,
+    "mg/m³": _MG_M3,
+    "ppm": _PPM,
+    "ppb": _PPB,
     "ºc": UnitOfTemperature.CELSIUS,
     "°c": UnitOfTemperature.CELSIUS,
     "%": PERCENTAGE,
@@ -58,15 +74,24 @@ UNIT_NORMALIZATION: dict[str, str] = {
     "km/h": UnitOfSpeed.KILOMETERS_PER_HOUR,
     "hpa": UnitOfPressure.HPA,
     "mbar": UnitOfPressure.MBAR,
+    "mb": UnitOfPressure.MBAR,
     "w/m2": UnitOfIrradiance.WATTS_PER_SQUARE_METER,
     "w/m²": UnitOfIrradiance.WATTS_PER_SQUARE_METER,
     "mm": UnitOfPrecipitationDepth.MILLIMETERS,
     "l/m2": UnitOfPrecipitationDepth.MILLIMETERS,
     "l/m²": UnitOfPrecipitationDepth.MILLIMETERS,
+    "mm/h": UnitOfVolumetricFlux.MILLIMETERS_PER_HOUR,
+    "l/m2h": UnitOfVolumetricFlux.MILLIMETERS_PER_HOUR,
+    "l/m²h": UnitOfVolumetricFlux.MILLIMETERS_PER_HOUR,
+    "l/m2·h": UnitOfVolumetricFlux.MILLIMETERS_PER_HOUR,
+    "l/m²·h": UnitOfVolumetricFlux.MILLIMETERS_PER_HOUR,
     "º": DEGREE,
     "°": DEGREE,
     "grados": DEGREE,
 }
+
+HUMIDITY_KEYWORDS: tuple[str, ...] = ("HR", "HUM", "HUMEDAD", "HUMIDITY")
+WIND_DIRECTION_KEYWORDS: tuple[str, ...] = ("DV", "DIR", "VIENTO", "WIND")
 
 
 @dataclass(frozen=True)
@@ -74,87 +99,104 @@ class PollutantClassRule:
     """Mapping rule from parameter code/name to HA SensorDeviceClass and icon."""
 
     device_class: SensorDeviceClass | None
-    required_unit: str | None
+    allowed_units: frozenset[str]
     icon: str
 
 
 POLLUTANT_RULES: dict[str, PollutantClassRule] = {
     "PM10": PollutantClassRule(
         device_class=SensorDeviceClass.PM10,
-        required_unit=CONCENTRATION_MICROGRAMS_PER_CUBIC_METER,
+        allowed_units=frozenset({_UG_M3}),
         icon="mdi:blur",
     ),
     "PM2.5": PollutantClassRule(
         device_class=SensorDeviceClass.PM25,
-        required_unit=CONCENTRATION_MICROGRAMS_PER_CUBIC_METER,
+        allowed_units=frozenset({_UG_M3}),
         icon="mdi:blur-radial",
     ),
     "PM2,5": PollutantClassRule(
         device_class=SensorDeviceClass.PM25,
-        required_unit=CONCENTRATION_MICROGRAMS_PER_CUBIC_METER,
+        allowed_units=frozenset({_UG_M3}),
         icon="mdi:blur-radial",
     ),
     "PM25": PollutantClassRule(
         device_class=SensorDeviceClass.PM25,
-        required_unit=CONCENTRATION_MICROGRAMS_PER_CUBIC_METER,
+        allowed_units=frozenset({_UG_M3}),
         icon="mdi:blur-radial",
     ),
     "PM1": PollutantClassRule(
         device_class=SensorDeviceClass.PM1,
-        required_unit=CONCENTRATION_MICROGRAMS_PER_CUBIC_METER,
+        allowed_units=frozenset({_UG_M3}),
         icon="mdi:blur-linear",
     ),
     "NO2": PollutantClassRule(
         device_class=SensorDeviceClass.NITROGEN_DIOXIDE,
-        required_unit=CONCENTRATION_MICROGRAMS_PER_CUBIC_METER,
+        allowed_units=frozenset({_UG_M3, _PPM, _PPB}),
         icon="mdi:smog",
     ),
     "NO": PollutantClassRule(
         device_class=SensorDeviceClass.NITROGEN_MONOXIDE,
-        required_unit=CONCENTRATION_MICROGRAMS_PER_CUBIC_METER,
+        allowed_units=frozenset({_UG_M3, _PPB}),
         icon="mdi:smog",
     ),
     "NOX": PollutantClassRule(
         device_class=None,
-        required_unit=None,
+        allowed_units=frozenset(),
         icon="mdi:smog",
     ),
     "SO2": PollutantClassRule(
         device_class=SensorDeviceClass.SULPHUR_DIOXIDE,
-        required_unit=CONCENTRATION_MICROGRAMS_PER_CUBIC_METER,
+        allowed_units=frozenset({_UG_M3, _PPB}),
         icon="mdi:chemical-weapon",
     ),
     "O3": PollutantClassRule(
         device_class=SensorDeviceClass.OZONE,
-        required_unit=CONCENTRATION_MICROGRAMS_PER_CUBIC_METER,
+        allowed_units=frozenset({_UG_M3, _PPM, _PPB}),
         icon="mdi:weather-sunny-alert",
     ),
     "CO": PollutantClassRule(
         device_class=SensorDeviceClass.CO,
-        required_unit=CONCENTRATION_PARTS_PER_MILLION,
+        allowed_units=frozenset({_PPM, _PPB, _UG_M3, _MG_M3}),
         icon="mdi:molecule-co",
     ),
     "C6H6": PollutantClassRule(
         device_class=SensorDeviceClass.VOLATILE_ORGANIC_COMPOUNDS,
-        required_unit=CONCENTRATION_MICROGRAMS_PER_CUBIC_METER,
+        allowed_units=frozenset({_UG_M3, _MG_M3}),
+        icon="mdi:hexagon-outline",
+    ),
+    "C7H8": PollutantClassRule(
+        device_class=SensorDeviceClass.VOLATILE_ORGANIC_COMPOUNDS,
+        allowed_units=frozenset({_UG_M3, _MG_M3}),
+        icon="mdi:hexagon-outline",
+    ),
+    "C8H10": PollutantClassRule(
+        device_class=SensorDeviceClass.VOLATILE_ORGANIC_COMPOUNDS,
+        allowed_units=frozenset({_UG_M3, _MG_M3}),
         icon="mdi:hexagon-outline",
     ),
     "SH2": PollutantClassRule(
         device_class=None,
-        required_unit=None,
+        allowed_units=frozenset(),
         icon="mdi:scent",
     ),
     "H2S": PollutantClassRule(
         device_class=None,
-        required_unit=None,
+        allowed_units=frozenset(),
         icon="mdi:scent",
     ),
     "NH3": PollutantClassRule(
         device_class=None,
-        required_unit=None,
+        allowed_units=frozenset(),
         icon="mdi:chemical-weapon",
     ),
 }
+
+ICA_SENSOR_DESCRIPTION = SensorEntityDescription(
+    key="ica",
+    translation_key="station_ica",
+    device_class=SensorDeviceClass.ENUM,
+    icon="mdi:air-filter",
+)
 
 
 def _normalize_unit(raw_symbol: str | None) -> str | None:
@@ -163,6 +205,20 @@ def _normalize_unit(raw_symbol: str | None) -> str | None:
         return None
     cleaned = raw_symbol.strip()
     return UNIT_NORMALIZATION.get(cleaned.lower(), cleaned)
+
+
+def _matches_keywords(meta: ParameterMetadata, keywords: tuple[str, ...]) -> bool:
+    """Return True if parameter name, tag, or description contains any keyword."""
+    haystacks = (
+        meta.name.strip().upper(),
+        meta.station_param_tag.strip().upper(),
+        meta.description.strip().upper(),
+    )
+    return any(
+        keyword == text or keyword in text.split() or (len(keyword) >= 4 and keyword in text)
+        for text in haystacks
+        for keyword in keywords
+    )
 
 
 def _resolve_sensor_classification(
@@ -178,8 +234,8 @@ def _resolve_sensor_classification(
             rule = POLLUTANT_RULES[code]
             if (
                 rule.device_class is not None
-                and rule.required_unit is not None
-                and normalized_unit == rule.required_unit
+                and normalized_unit is not None
+                and normalized_unit in rule.allowed_units
             ):
                 return (
                     rule.device_class,
@@ -195,11 +251,13 @@ def _resolve_sensor_classification(
             "mdi:thermometer",
         )
     if normalized_unit == PERCENTAGE:
-        return (
-            SensorDeviceClass.HUMIDITY,
-            SensorStateClass.MEASUREMENT,
-            "mdi:water-percent",
-        )
+        if _matches_keywords(meta, HUMIDITY_KEYWORDS):
+            return (
+                SensorDeviceClass.HUMIDITY,
+                SensorStateClass.MEASUREMENT,
+                "mdi:water-percent",
+            )
+        return None, SensorStateClass.MEASUREMENT, "mdi:percent"
     if normalized_unit in (
         UnitOfSpeed.METERS_PER_SECOND,
         UnitOfSpeed.KILOMETERS_PER_HOUR,
@@ -227,12 +285,20 @@ def _resolve_sensor_classification(
             SensorStateClass.MEASUREMENT,
             "mdi:weather-rainy",
         )
-    if normalized_unit == DEGREE:
+    if normalized_unit == UnitOfVolumetricFlux.MILLIMETERS_PER_HOUR:
         return (
-            SensorDeviceClass.WIND_DIRECTION,
-            SensorStateClass.MEASUREMENT_ANGLE,
-            "mdi:compass-outline",
+            SensorDeviceClass.PRECIPITATION_INTENSITY,
+            SensorStateClass.MEASUREMENT,
+            "mdi:weather-pouring",
         )
+    if normalized_unit == DEGREE:
+        if _matches_keywords(meta, WIND_DIRECTION_KEYWORDS):
+            return (
+                SensorDeviceClass.WIND_DIRECTION,
+                SensorStateClass.MEASUREMENT_ANGLE,
+                "mdi:compass-outline",
+            )
+        return None, SensorStateClass.MEASUREMENT_ANGLE, "mdi:angle-acute"
 
     return None, SensorStateClass.MEASUREMENT, "mdi:chemical-weapon"
 
@@ -240,25 +306,25 @@ def _resolve_sensor_classification(
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: CalidadAireCanariasConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up Calidad del Aire Canarias sensors based on a config entry."""
     coordinator = entry.runtime_data
     data = coordinator.data
     station_id = data.station_id
 
-    # Limpiar entidades huérfanas o 'Desconocida' registradas previamente en el Entity Registry
+    # Limpiar entidades sensor huérfanas o 'Desconocida' registradas previamente en el Entity Registry
     valid_unique_ids: set[str] = {f"{station_id}_ica"} | {
-        f"{station_id}_param_{param_id}"
-        for param_id in data.parameters_metadata
+        f"{station_id}_param_{param_id}" for param_id in data.parameters_metadata
     }
     ent_reg = er.async_get(hass)
-    for entity_entry in er.async_entries_for_config_entry(
-        ent_reg, entry.entry_id
-    ):
-        if entity_entry.unique_id not in valid_unique_ids:
+    for entity_entry in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
+        if (
+            entity_entry.domain == Platform.SENSOR
+            and entity_entry.unique_id not in valid_unique_ids
+        ):
             _LOGGER.info(
-                "Eliminando entidad obsoleta o sin identificar del registro: %s (%s)",
+                "Eliminando entidad sensor obsoleta o sin identificar del registro: %s (%s)",
                 entity_entry.entity_id,
                 entity_entry.unique_id,
             )
@@ -280,37 +346,10 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class CalidadAireCanariasBaseSensor(
-    CoordinatorEntity[CalidadAireCanariasDataUpdateCoordinator], SensorEntity
-):
-    """Base sensor class for Calidad del Aire - Gobierno de Canarias."""
-
-    _attr_has_entity_name = True
-
-    def __init__(
-        self,
-        coordinator: CalidadAireCanariasDataUpdateCoordinator,
-    ) -> None:
-        """Initialize the base sensor."""
-        super().__init__(coordinator)
-        station_data = coordinator.data
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, str(station_data.station_id))},
-            name=station_data.station_name
-            or f"Estación {station_data.station_id}",
-            manufacturer=MANUFACTURER,
-            model=MODEL,
-            serial_number=station_data.cnac or station_data.station_tag or None,
-            entry_type=DeviceEntryType.SERVICE,
-            configuration_url="https://www3.gobiernodecanarias.org/calidadambiental/calidadaire/",
-        )
-
-
-class CalidadAireCanariasIcaSensor(CalidadAireCanariasBaseSensor):
+class CalidadAireCanariasIcaSensor(CalidadAireCanariasEntity, SensorEntity):
     """Sensor representing the overall Air Quality Index (ICA) of the station."""
 
-    _attr_translation_key = "station_ica"
-    _attr_icon = "mdi:air-filter"
+    entity_description = ICA_SENSOR_DESCRIPTION
 
     def __init__(
         self,
@@ -320,12 +359,14 @@ class CalidadAireCanariasIcaSensor(CalidadAireCanariasBaseSensor):
         super().__init__(coordinator)
         station_id = coordinator.data.station_id
         self._attr_unique_id = f"{station_id}_ica"
-        self.entity_description = SensorEntityDescription(
-            key="ica",
-            translation_key="station_ica",
-            name="Índice de Calidad del Aire (ICA)",
-            icon="mdi:air-filter",
-        )
+
+    @property
+    def options(self) -> list[str]:
+        """Return valid ICA category options, including any unexpected API value safely."""
+        current = self.native_value
+        if current is not None and current not in ICA_CATEGORIES:
+            return [*ICA_CATEGORIES, current]
+        return list(ICA_CATEGORIES)
 
     @property
     def native_value(self) -> str | None:
@@ -351,7 +392,7 @@ class CalidadAireCanariasIcaSensor(CalidadAireCanariasBaseSensor):
         }
 
 
-class CalidadAireCanariasParameterSensor(CalidadAireCanariasBaseSensor):
+class CalidadAireCanariasParameterSensor(CalidadAireCanariasEntity, SensorEntity):
     """Sensor for an individual pollutant or parameter measured at the station."""
 
     _attr_suggested_display_precision = 1
@@ -371,9 +412,7 @@ class CalidadAireCanariasParameterSensor(CalidadAireCanariasBaseSensor):
         self._attr_unique_id = f"{station_id}_param_{parameter_id}"
 
         normalized_unit = _normalize_unit(metadata.unit_symbol)
-        device_class, state_class, icon = _resolve_sensor_classification(
-            metadata, normalized_unit
-        )
+        device_class, state_class, icon = _resolve_sensor_classification(metadata, normalized_unit)
 
         # Construimos un nombre descriptivo combinando descripción y código si difieren
         display_name = metadata.description.strip()

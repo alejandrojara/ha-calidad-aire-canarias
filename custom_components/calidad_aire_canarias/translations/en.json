@@ -3,9 +3,12 @@
     "step": {
       "user": {
         "title": "Connect to Canary Islands Air Quality API",
-        "description": "Enter your Bearer Token for the Government of the Canary Islands Public Air Quality API.",
+        "description": "Unofficial community integration for Home Assistant, not affiliated with, endorsed, or supported by the Government of the Canary Islands. Enter your Bearer Token for the Public Air Quality API (v1) to fetch active monitoring stations.",
         "data": {
           "access_token": "Access Token (Bearer Token)"
+        },
+        "data_description": {
+          "access_token": "Bearer token obtained from the Canary Islands Air Quality portal. You can paste it with or without the 'Bearer ' prefix."
         }
       },
       "station": {
@@ -13,6 +16,9 @@
         "description": "Choose the active station from the Canary Islands Air Quality Monitoring Network you want to monitor.",
         "data": {
           "station_id": "Active station"
+        },
+        "data_description": {
+          "station_id": "You can add more stations later by adding this integration again."
         }
       },
       "reauth_confirm": {
@@ -20,19 +26,34 @@
         "description": "The Bearer token configured for station **{station_name}** is no longer valid. Please enter a new access token.",
         "data": {
           "access_token": "New Access Token (Bearer Token)"
+        },
+        "data_description": {
+          "access_token": "Paste the new valid Bearer token for the API."
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure Canary Islands Air Quality",
+        "description": "Update the Bearer token configured for station **{station_name}**.",
+        "data": {
+          "access_token": "Access Token (Bearer Token)"
+        },
+        "data_description": {
+          "access_token": "Enter the updated Bearer token to reconnect without removing the station."
         }
       }
     },
     "error": {
       "cannot_connect": "Failed to connect to the Canary Islands Government API. Check your connection or try again later.",
       "invalid_auth": "Missing or invalid Bearer credential (HTTP 401/403).",
-      "rate_limited": "API usage limit or query cost exceeded (HTTP 429). Please try again later.",
+      "invalid_station": "The selected station is not valid. Please choose a station from the list.",
       "no_active_stations": "No active public stations were found in the API response.",
+      "rate_limited": "API usage limit or query cost exceeded (HTTP 429). Please try again later.",
       "unknown": "An unexpected error occurred."
     },
     "abort": {
       "already_configured": "This station is already configured in Home Assistant.",
-      "reauth_successful": "Reauthentication was successful."
+      "reauth_successful": "Reauthentication was successful.",
+      "reconfigure_successful": "Station credentials were updated successfully."
     }
   },
   "options": {
@@ -42,15 +63,28 @@
         "description": "Adjust the polling frequency for hourly station data.",
         "data": {
           "scan_interval": "Polling interval (minutes)"
+        },
+        "data_description": {
+          "scan_interval": "Measurements are published hourly. Keeping 60 minutes (default) minimizes API load and avoids HTTP 429 rate limits."
         }
       }
     }
   },
   "entity": {
+    "button": {
+      "refresh": {
+        "name": "Refresh"
+      }
+    },
     "sensor": {
       "station_ica": {
         "name": "Air Quality Index (ICA)"
       }
+    }
+  },
+  "exceptions": {
+    "refresh_cooldown": {
+      "message": "Please wait {seconds} seconds before refreshing this station again."
     }
   }
 }

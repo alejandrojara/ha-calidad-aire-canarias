@@ -13,12 +13,10 @@ from .coordinator import (
     CalidadAireCanariasDataUpdateCoordinator,
 )
 
-PLATFORMS: list[Platform] = [Platform.SENSOR]
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BUTTON]
 
 
-async def async_setup_entry(
-    hass: HomeAssistant, entry: CalidadAireCanariasConfigEntry
-) -> bool:
+async def async_setup_entry(hass: HomeAssistant, entry: CalidadAireCanariasConfigEntry) -> bool:
     """Set up Calidad del Aire - Gobierno de Canarias from a config entry."""
     session = async_get_clientsession(hass)
     client = CalidadAireCanariasApiClient(
@@ -39,20 +37,10 @@ async def async_setup_entry(
     entry.runtime_data = coordinator
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    entry.async_on_unload(entry.add_update_listener(async_reload_entry))
 
     return True
 
 
-async def async_unload_entry(
-    hass: HomeAssistant, entry: CalidadAireCanariasConfigEntry
-) -> bool:
+async def async_unload_entry(hass: HomeAssistant, entry: CalidadAireCanariasConfigEntry) -> bool:
     """Unload a config entry."""
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-
-
-async def async_reload_entry(
-    hass: HomeAssistant, entry: CalidadAireCanariasConfigEntry
-) -> None:
-    """Reload config entry when options or credentials are updated."""
-    await hass.config_entries.async_reload(entry.entry_id)

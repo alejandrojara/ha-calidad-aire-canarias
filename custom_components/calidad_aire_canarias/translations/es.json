@@ -3,9 +3,12 @@
     "step": {
       "user": {
         "title": "Conectar con la API de Calidad del Aire de Canarias",
-        "description": "Introduce tu token de acceso (Bearer Token) para la API pública de Calidad del Aire del Gobierno de Canarias.",
+        "description": "Integración comunitaria no oficial para Home Assistant, sin afiliación, patrocinio ni soporte del Gobierno de Canarias. Introduce tu token de acceso (Bearer Token) de la API pública de Calidad del Aire (v1) para obtener las estaciones activas.",
         "data": {
           "access_token": "Token de acceso (Bearer Token)"
+        },
+        "data_description": {
+          "access_token": "Token Bearer obtenido en el portal de Calidad del Aire del Gobierno de Canarias. Puedes pegarlo con o sin el prefijo 'Bearer '."
         }
       },
       "station": {
@@ -13,6 +16,9 @@
         "description": "Elige la estación activa de la Red de Control y Vigilancia de la Calidad del Aire de Canarias que deseas monitorizar.",
         "data": {
           "station_id": "Estación activa"
+        },
+        "data_description": {
+          "station_id": "Puedes monitorizar varias estaciones añadiendo de nuevo esta integración."
         }
       },
       "reauth_confirm": {
@@ -20,19 +26,34 @@
         "description": "El token Bearer configurado para la estación **{station_name}** ya no es válido. Introduce un nuevo token de acceso.",
         "data": {
           "access_token": "Nuevo token de acceso (Bearer Token)"
+        },
+        "data_description": {
+          "access_token": "Pega el nuevo token Bearer válido para la API."
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigurar Calidad del Aire de Canarias",
+        "description": "Actualiza el token Bearer configurado para la estación **{station_name}**.",
+        "data": {
+          "access_token": "Token de acceso (Bearer Token)"
+        },
+        "data_description": {
+          "access_token": "Introduce el nuevo token Bearer para reconectar sin eliminar la estación."
         }
       }
     },
     "error": {
       "cannot_connect": "No se pudo conectar con la API del Gobierno de Canarias. Comprueba tu conexión o inténtalo más tarde.",
       "invalid_auth": "Credencial Bearer ausente o no válida (HTTP 401/403).",
-      "rate_limited": "Se ha superado el límite de uso o coste de consulta de la API (HTTP 429). Inténtalo más tarde.",
+      "invalid_station": "La estación seleccionada no es válida. Selecciona una estación de la lista.",
       "no_active_stations": "No se encontraron estaciones públicas activas en la respuesta de la API.",
+      "rate_limited": "Se ha superado el límite de uso o coste de consulta de la API (HTTP 429). Inténtalo más tarde.",
       "unknown": "Se produjo un error inesperado."
     },
     "abort": {
       "already_configured": "Esta estación ya está configurada en Home Assistant.",
-      "reauth_successful": "La reautenticación se ha completado correctamente."
+      "reauth_successful": "La reautenticación se ha completado correctamente.",
+      "reconfigure_successful": "Las credenciales de la estación se han actualizado correctamente."
     }
   },
   "options": {
@@ -42,15 +63,28 @@
         "description": "Ajusta la frecuencia de actualización de los datos horarios de la estación.",
         "data": {
           "scan_interval": "Intervalo de sondeo (minutos)"
+        },
+        "data_description": {
+          "scan_interval": "Las mediciones se publican con resolución horaria. Mantener 60 minutos (valor por defecto) minimiza la carga en la API y evita límites HTTP 429."
         }
       }
     }
   },
   "entity": {
+    "button": {
+      "refresh": {
+        "name": "Actualizar"
+      }
+    },
     "sensor": {
       "station_ica": {
         "name": "Índice de Calidad del Aire (ICA)"
       }
+    }
+  },
+  "exceptions": {
+    "refresh_cooldown": {
+      "message": "Espera {seconds} segundos antes de volver a actualizar esta estación."
     }
   }
 }

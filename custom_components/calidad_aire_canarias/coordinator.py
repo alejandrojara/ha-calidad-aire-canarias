@@ -5,12 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import timedelta
 import logging
+import math
 import re
+import time
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
     UpdateFailed,
@@ -25,10 +27,15 @@ from .api import (
 )
 from .const import (
     CONF_SCAN_INTERVAL,
+    DEFAULT_RATE_LIMIT_BACKOFF_SECONDS,
     DEFAULT_SCAN_INTERVAL_MINUTES,
     DOMAIN,
     ICA_DISPLAY_NAMES,
     ICA_SEVERITY_ORDER,
+    MANUAL_REFRESH_COOLDOWN_SECONDS,
+    MAX_RATE_LIMIT_BACKOFF_SECONDS,
+    MAX_SCAN_INTERVAL_MINUTES,
+    MIN_SCAN_INTERVAL_MINUTES,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -84,6 +91,26 @@ KNOWN_PARAMETER_DESCRIPTIONS: dict[str, str] = {
     "PREC": "Precipitación",
 }
 
+# Equivalencias explícitas entre descripciones textuales y códigos de contaminante ICA
+POLLUTANT_DESCRIPTION_ALIASES: dict[str, str] = {
+    "DIÓXIDO DE AZUFRE": "SO2",
+    "DIOXIDO DE AZUFRE": "SO2",
+    "DIÓXIDO DE NITRÓGENO": "NO2",
+    "DIOXIDO DE NITROGENO": "NO2",
+    "MONÓXIDO DE NITRÓGENO": "NO",
+    "MONOXIDO DE NITROGENO": "NO",
+    "ÓXIDOS DE NITRÓGENO": "NOX",
+    "OXIDOS DE NITROGENO": "NOX",
+    "PARTÍCULAS PM10": "PM10",
+    "PARTICULAS PM10": "PM10",
+    "PARTÍCULAS PM2.5": "PM2.5",
+    "PARTICULAS PM2.5": "PM2.5",
+    "OZONO": "O3",
+    "MONÓXIDO DE CARBONO": "CO",
+    "MONOXIDO DE CARBONO": "CO",
+    "BENCENO": "C6H6",
+}
+
 
 def _clean_label(value: Any) -> str:
     """Return stripped label or empty string if it is a placeholder like 'Desconocida'."""
@@ -93,6 +120,27 @@ def _clean_label(value: Any) -> str:
     if text.lower() in INVALID_PARAMETER_LABELS:
         return ""
     return text
+
+
+def _safe_float(value: Any) -> float | None:
+    """Convert value to a finite float or return None if invalid."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _safe_int(value: Any) -> int | None:
+    """Convert value to an int or return None if invalid."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 @dataclass
@@ -134,9 +182,7 @@ class StationAirQualityData:
     longitude: float | None
     altitude: float | None
     active: bool
-    parameters_metadata: dict[int, ParameterMetadata] = field(
-        default_factory=dict
-    )
+    parameters_metadata: dict[int, ParameterMetadata] = field(default_factory=dict)
     readings: dict[int, ParameterReading] = field(default_factory=dict)
     overall_ica: str | None = None
     dominant_parameter: str | None = None
@@ -145,9 +191,7 @@ class StationAirQualityData:
     ica_by_parameter: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
-type CalidadAireCanariasConfigEntry = ConfigEntry[
-    CalidadAireCanariasDataUpdateCoordinator
-]
+type CalidadAireCanariasConfigEntry = ConfigEntry[CalidadAireCanariasDataUpdateCoordinator]
 
 
 def _normalize_pollutant_token(value: str) -> str:
@@ -156,22 +200,20 @@ def _normalize_pollutant_token(value: str) -> str:
     cleaned = re.sub(r"\s+", " ", cleaned)
     if cleaned == "PM25":
         return "PM2.5"
-    return cleaned
+    return POLLUTANT_DESCRIPTION_ALIASES.get(cleaned, cleaned)
 
 
 def _normalize_ica_category(raw_ica: str | None) -> str | None:
     """Normalize ICA textual category to clean display casing."""
     if not raw_ica:
         return None
-    cleaned = raw_ica.strip()
+    cleaned = re.sub(r"\s+", " ", raw_ica.strip())
     if not cleaned:
         return None
     return ICA_DISPLAY_NAMES.get(cleaned.lower(), cleaned)
 
 
-class CalidadAireCanariasDataUpdateCoordinator(
-    DataUpdateCoordinator[StationAirQualityData]
-):
+class CalidadAireCanariasDataUpdateCoordinator(DataUpdateCoordinator[StationAirQualityData]):
     """Coordinator to manage fetching air quality data from Gobierno de Canarias API."""
 
     config_entry: CalidadAireCanariasConfigEntry
@@ -184,10 +226,14 @@ class CalidadAireCanariasDataUpdateCoordinator(
         station_id: int,
     ) -> None:
         """Initialize the coordinator."""
-        scan_minutes = int(
-            entry.options.get(
-                CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL_MINUTES
-            )
+        raw_scan_minutes = _safe_int(
+            entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL_MINUTES)
+        )
+        if raw_scan_minutes is None:
+            raw_scan_minutes = DEFAULT_SCAN_INTERVAL_MINUTES
+        scan_minutes = min(
+            max(raw_scan_minutes, MIN_SCAN_INTERVAL_MINUTES),
+            MAX_SCAN_INTERVAL_MINUTES,
         )
         self._default_interval = timedelta(minutes=scan_minutes)
         super().__init__(
@@ -196,38 +242,68 @@ class CalidadAireCanariasDataUpdateCoordinator(
             config_entry=entry,
             name=f"{DOMAIN}_{station_id}",
             update_interval=self._default_interval,
+            always_update=False,
         )
         self.client = client
         self.station_id = station_id
         self._station_detail: dict[str, Any] | None = None
+        self._rate_limit_active = False
+        self._last_manual_refresh: float | None = None
+        self._last_error: str | None = None
+
+    async def async_manual_refresh(self) -> None:
+        """Trigger a cooldown-protected on-demand refresh."""
+        now = time.monotonic()
+        if self._last_manual_refresh is not None:
+            elapsed = now - self._last_manual_refresh
+            if elapsed < MANUAL_REFRESH_COOLDOWN_SECONDS:
+                remaining = math.ceil(MANUAL_REFRESH_COOLDOWN_SECONDS - elapsed)
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN,
+                    translation_key="refresh_cooldown",
+                    translation_placeholders={"seconds": str(remaining)},
+                )
+
+        self._last_manual_refresh = now
+        await self.async_refresh()
 
     async def _async_update_data(self) -> StationAirQualityData:
         """Fetch station detail (if needed), current ICA, and realtime measurements."""
         try:
             if self._station_detail is None:
-                self._station_detail = (
-                    await self.client.async_get_station_detail(self.station_id)
-                )
+                self._station_detail = await self.client.async_get_station_detail(self.station_id)
 
-            parameters_meta = self._parse_parameters_metadata(
-                self._station_detail
-            )
+            parameters_meta = self._parse_parameters_metadata(self._station_detail)
             parameter_ids = list(parameters_meta.keys())
 
             # 1. Consultamos el ICA actual de la estación
-            ica_payload = await self.client.async_get_station_ica(
-                self.station_id
-            )
+            ica_payload: dict[str, Any] | None = None
+            ica_error: CalidadAireCanariasError | None = None
+            try:
+                ica_payload = await self.client.async_get_station_ica(self.station_id)
+            except (
+                CalidadAireCanariasAuthError,
+                CalidadAireCanariasRateLimitError,
+                CalidadAireCanariasConnectionError,
+            ):
+                raise
+            except CalidadAireCanariasError as err:
+                ica_error = err
+                _LOGGER.warning(
+                    "No se pudo obtener el ICA para la estación %s (%s). "
+                    "Se intentarán obtener los datos en tiempo real.",
+                    self.station_id,
+                    err,
+                )
 
             # 2. Consultamos los datos temporales horarios de las últimas horas (alineadas a UTC)
             realtime_records: list[dict[str, Any]] = []
+            realtime_error: CalidadAireCanariasError | None = None
             if parameter_ids:
                 try:
-                    realtime_records = (
-                        await self.client.async_get_realtime_datasets(
-                            station_id=self.station_id,
-                            parameter_ids=parameter_ids,
-                        )
+                    realtime_records = await self.client.async_get_realtime_datasets(
+                        station_id=self.station_id,
+                        parameter_ids=parameter_ids,
                     )
                 except (
                     CalidadAireCanariasAuthError,
@@ -236,6 +312,7 @@ class CalidadAireCanariasDataUpdateCoordinator(
                 ):
                     raise
                 except CalidadAireCanariasError as err:
+                    realtime_error = err
                     _LOGGER.warning(
                         "No se pudieron obtener los datasets en tiempo real para la estación %s (%s). "
                         "Se utilizarán los datos disponibles de ICA.",
@@ -243,23 +320,47 @@ class CalidadAireCanariasDataUpdateCoordinator(
                         err,
                     )
 
+            # Evitar dejar todos los sensores vacíos si ambos endpoints fallan o el único disponible falla
+            if ica_error is not None and (realtime_error is not None or not parameter_ids):
+                raise ica_error
+            if realtime_error is not None and ica_payload is None:
+                raise realtime_error
+
             # Si el intervalo había sido incrementado por un HTTP 429 previo, lo restauramos
             if self.update_interval != self._default_interval:
                 self.update_interval = self._default_interval
+            self._rate_limit_active = False
+            self._last_error = None
 
         except CalidadAireCanariasAuthError as err:
+            self._last_error = str(err)
             raise ConfigEntryAuthFailed(
                 f"Error de autenticación Bearer con la API de Calidad del Aire: {err}"
             ) from err
         except CalidadAireCanariasRateLimitError as err:
-            if err.retry_after:
-                self.update_interval = timedelta(
-                    seconds=max(err.retry_after, 60)
+            self._last_error = str(err)
+            self._rate_limit_active = True
+            if err.retry_after is not None:
+                backoff_seconds = min(
+                    max(err.retry_after, 60),
+                    MAX_RATE_LIMIT_BACKOFF_SECONDS,
                 )
+            else:
+                current_seconds = (
+                    int(self.update_interval.total_seconds())
+                    if self.update_interval is not None
+                    else DEFAULT_RATE_LIMIT_BACKOFF_SECONDS
+                )
+                backoff_seconds = min(
+                    max(current_seconds * 2, DEFAULT_RATE_LIMIT_BACKOFF_SECONDS),
+                    MAX_RATE_LIMIT_BACKOFF_SECONDS,
+                )
+            self.update_interval = timedelta(seconds=backoff_seconds)
             raise UpdateFailed(
-                f"Límite de tasa superado (HTTP 429). Reintentar tras {err.retry_after or 3600}s: {err}"
+                f"Límite de tasa superado (HTTP 429). Reintento programado en {backoff_seconds}s: {err}"
             ) from err
         except CalidadAireCanariasError as err:
+            self._last_error = str(err)
             raise UpdateFailed(
                 f"Error comunicando con la API de Calidad del Aire de Canarias: {err}"
             ) from err
@@ -270,6 +371,41 @@ class CalidadAireCanariasDataUpdateCoordinator(
             ica_payload,
             realtime_records,
         )
+
+    def get_diagnostics(self) -> dict[str, Any]:
+        """Return sanitized diagnostic details for this station coordinator."""
+        data = self.data
+        return {
+            "station_id": self.station_id,
+            "default_interval_seconds": int(self._default_interval.total_seconds()),
+            "current_interval_seconds": (
+                int(self.update_interval.total_seconds())
+                if self.update_interval is not None
+                else None
+            ),
+            "rate_limit_active": self._rate_limit_active,
+            "last_update_success": self.last_update_success,
+            "last_error": self._last_error,
+            "station": (
+                {
+                    "station_name": data.station_name,
+                    "station_tag": data.station_tag,
+                    "cnac": data.cnac,
+                    "zone_id": data.zone_id,
+                    "active": data.active,
+                    "overall_ica": data.overall_ica,
+                    "dominant_parameter": data.dominant_parameter,
+                    "ica_date": data.ica_date,
+                    "ica_period": data.ica_period,
+                    "parameters_count": len(data.parameters_metadata),
+                    "readings_with_value": sum(
+                        1 for reading in data.readings.values() if reading.value is not None
+                    ),
+                }
+                if data is not None
+                else None
+            ),
+        }
 
     @staticmethod
     def _parse_parameters_metadata(
@@ -283,10 +419,14 @@ class CalidadAireCanariasDataUpdateCoordinator(
                 continue
             param_obj = item.get("parameter") or {}
             unit_obj = item.get("unit") or {}
-            param_id = param_obj.get("id")
-            if param_id is None:
+            if not isinstance(param_obj, dict):
                 continue
-            param_id_int = int(param_id)
+            if not isinstance(unit_obj, dict):
+                unit_obj = {}
+
+            param_id_int = _safe_int(param_obj.get("id"))
+            if param_id_int is None:
+                continue
 
             raw_name = _clean_label(param_obj.get("name"))
             raw_desc = _clean_label(param_obj.get("description"))
@@ -328,7 +468,9 @@ class CalidadAireCanariasDataUpdateCoordinator(
         realtime_records: list[dict[str, Any]],
     ) -> StationAirQualityData:
         """Combine station metadata, ICA response, and latest realtime readings."""
-        coords = station_detail.get("coordinates") or {}
+        coords = station_detail.get("coordinates")
+        if not isinstance(coords, dict):
+            coords = {}
 
         # Procesar el ICA por parámetro y determinar el ICA global de la estación
         ica_by_parameter: dict[str, dict[str, Any]] = {}
@@ -346,8 +488,8 @@ class CalidadAireCanariasDataUpdateCoordinator(
                 raw_ica_cat = str(ica_item.get("ica") or "").strip()
                 ica_cat = _normalize_ica_category(raw_ica_cat)
                 item_date = ica_item.get("date")
-                item_period = ica_item.get("period")
-                measurement_val = ica_item.get("measurementValue")
+                item_period = _safe_int(ica_item.get("period"))
+                measurement_val = _safe_float(ica_item.get("measurementValue"))
 
                 if not param_key:
                     continue
@@ -365,9 +507,7 @@ class CalidadAireCanariasDataUpdateCoordinator(
                     if severity > max_severity:
                         max_severity = severity
                         overall_ica = ica_cat
-                        dominant_parameter = (
-                            param_key if severity > 0 else None
-                        )
+                        dominant_parameter = param_key if severity > 0 else None
                         ica_date = item_date
                         ica_period = item_period
 
@@ -376,14 +516,13 @@ class CalidadAireCanariasDataUpdateCoordinator(
         for record in realtime_records:
             if not isinstance(record, dict):
                 continue
-            param_id = record.get("parameterId")
-            temp_val = record.get("temporalValue")
-            if param_id is None or temp_val is None:
+            param_id_int = _safe_int(record.get("parameterId"))
+            temp_val = _safe_float(record.get("temporalValue"))
+            if param_id_int is None or temp_val is None:
                 continue
-            param_id_int = int(param_id)
             rec_key = (
                 str(record.get("date") or ""),
-                int(record.get("period") or 0),
+                _safe_int(record.get("period")) or 0,
             )
             current = latest_realtime.get(param_id_int)
             if current is None:
@@ -391,7 +530,7 @@ class CalidadAireCanariasDataUpdateCoordinator(
             else:
                 curr_key = (
                     str(current.get("date") or ""),
-                    int(current.get("period") or 0),
+                    _safe_int(current.get("period")) or 0,
                 )
                 if rec_key >= curr_key:
                     latest_realtime[param_id_int] = record
@@ -408,24 +547,22 @@ class CalidadAireCanariasDataUpdateCoordinator(
             flag_str: str | None = None
 
             if rt_record is not None:
-                raw_val = rt_record.get("temporalValue")
-                value = float(raw_val) if raw_val is not None else None
-                date_str = rt_record.get("date")
-                period_int = rt_record.get("period")
-                flag_obj = rt_record.get("temporalFlag") or {}
+                value = _safe_float(rt_record.get("temporalValue"))
+                raw_date = rt_record.get("date")
+                date_str = str(raw_date) if raw_date is not None else None
+                period_int = _safe_int(rt_record.get("period"))
+                flag_obj = rt_record.get("temporalFlag")
                 flag_str = (
-                    flag_obj.get("value")
-                    if isinstance(flag_obj, dict)
+                    str(flag_obj["value"])
+                    if isinstance(flag_obj, dict) and flag_obj.get("value") is not None
                     else None
                 )
-            elif (
-                matched_ica is not None
-                and matched_ica.get("measurement_value") is not None
-            ):
+            elif matched_ica is not None and matched_ica.get("measurement_value") is not None:
                 # Fallback al valor medido reportado en el endpoint ICA si no hay registro en realtime
-                value = float(matched_ica["measurement_value"])
-                date_str = matched_ica.get("date")
-                period_int = matched_ica.get("period")
+                value = _safe_float(matched_ica["measurement_value"])
+                raw_ica_date = matched_ica.get("date")
+                date_str = str(raw_ica_date) if raw_ica_date is not None else None
+                period_int = _safe_int(matched_ica.get("period"))
 
             readings[param_id] = ParameterReading(
                 parameter_id=param_id,
@@ -435,22 +572,21 @@ class CalidadAireCanariasDataUpdateCoordinator(
                 flag=flag_str,
                 ica_category=matched_ica.get("ica") if matched_ica else None,
                 ica_measurement_value=(
-                    float(matched_ica["measurement_value"])
-                    if matched_ica
-                    and matched_ica.get("measurement_value") is not None
+                    _safe_float(matched_ica["measurement_value"])
+                    if matched_ica and matched_ica.get("measurement_value") is not None
                     else None
                 ),
             )
 
         return StationAirQualityData(
-            station_id=int(station_detail.get("id", 0)),
+            station_id=_safe_int(station_detail.get("id")) or 0,
             station_name=str(station_detail.get("name") or ""),
             station_tag=str(station_detail.get("tag") or ""),
             cnac=station_detail.get("cnac"),
-            zone_id=station_detail.get("zoneId"),
-            latitude=coords.get("latitude"),
-            longitude=coords.get("longitude"),
-            altitude=coords.get("altitude"),
+            zone_id=_safe_int(station_detail.get("zoneId")),
+            latitude=_safe_float(coords.get("latitude")),
+            longitude=_safe_float(coords.get("longitude")),
+            altitude=_safe_float(coords.get("altitude")),
             active=bool(station_detail.get("active", True)),
             parameters_metadata=parameters_meta,
             readings=readings,
@@ -467,16 +603,30 @@ class CalidadAireCanariasDataUpdateCoordinator(
         ica_by_parameter: dict[str, dict[str, Any]],
     ) -> dict[str, Any] | None:
         """Match a station parameter metadata with an ICA parameter entry if applicable."""
-        candidates = {
+        code_candidates = {
             _normalize_pollutant_token(meta.name),
             _normalize_pollutant_token(meta.station_param_tag),
-            _normalize_pollutant_token(meta.description),
         }
+        code_candidates.discard("")
+        desc_token = _normalize_pollutant_token(meta.description)
+
+        # 1. Coincidencia exacta por código/etiqueta o alias conocido de descripción
+        all_exact = set(code_candidates)
+        if desc_token:
+            all_exact.add(desc_token)
+
         for key, ica_info in ica_by_parameter.items():
             norm_key = _normalize_pollutant_token(key)
-            if norm_key in candidates:
+            if norm_key and norm_key in all_exact:
                 return ica_info
+
+        # 2. Coincidencia por frontera de token únicamente sobre código/etiqueta (evita falsos positivos
+        # como 'NO' dentro de 'Hidrocarburos no metánicos')
+        for key, ica_info in ica_by_parameter.items():
+            norm_key = _normalize_pollutant_token(key)
+            if len(norm_key) < 2:
+                continue
             pattern = rf"(?<![A-Z0-9]){re.escape(norm_key)}(?![A-Z0-9])"
-            if any(re.search(pattern, cand) for cand in candidates if cand):
+            if any(re.search(pattern, cand) for cand in code_candidates):
                 return ica_info
         return None

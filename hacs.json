@@ -1,6 +1,7 @@
 {
   "name": "Calidad del Aire - Gobierno de Canarias",
-  "country": "ES",
-  "homeassistant": "2024.4.0",
+  "country": ["ES"],
+  "hide_default_branch": true,
+  "homeassistant": "2025.8.0",
   "render_readme": true
 }
